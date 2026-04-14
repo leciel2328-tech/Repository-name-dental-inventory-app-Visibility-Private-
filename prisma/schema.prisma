@@ -1,13 +1,14 @@
 // Prismaのスキーマ定義ファイル
-// SQLiteデータベースの構造を定義します
+// 本番環境（Vercel）では PostgreSQL（Neon）を使用します
+// DATABASE_URL は .env ファイル（ローカル）または Vercel の環境変数で設定します
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // 歯科材料テーブル
