@@ -1,0 +1,27 @@
+// Prismaのスキーマ定義ファイル
+// SQLiteデータベースの構造を定義します
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// 歯科材料テーブル
+model Material {
+  id           Int      @id @default(autoincrement())
+  name         String   // 材料名（例: グローブ、滅菌パック）
+  size         String   @default("")  // サイズ・規格（例: SS, S, L, M）空文字＝サイズなし
+  clinic       String   @default("")  // 医院名（例: あつたの森歯科クリニック）
+  category     String   // カテゴリ
+  currentStock Float    @default(0)  // 現在庫数
+  unit         String   // 単位（枚、本、個など）
+  dailyUsage   Float    @default(1)  // 1日平均使用数
+  importance   String   @default("medium")  // 重要度: high/medium/low
+  notes        String   @default("")  // メモ
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

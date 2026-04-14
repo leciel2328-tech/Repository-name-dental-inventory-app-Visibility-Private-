@@ -1,0 +1,21 @@
+# Next.js
+.next/
+out/
+
+# Node.js
+node_modules/
+
+# Database（データベースファイルはバックアップ別管理推奨）
+prisma/dev.db
+prisma/dev.db-journal
+prisma/dev.db-shm
+prisma/dev.db-wal
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# OS
+.DS_Store
+Thumbs.db
