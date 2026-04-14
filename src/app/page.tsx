@@ -4,30 +4,55 @@ import { useState, useEffect } from "react";
 import MaterialModal from "@/components/MaterialModal";
 
 // ─── 医院リスト ───────────────────────────────────────────
-// as const をつけることで、TypeScriptが「文字列の配列」ではなく
-// 「この2つの文字列だけ」と認識し、型安全になります
 const CLINICS = [
   "あつたの森歯科クリニック",
   "あかつき台歯科医院",
 ] as const;
 
-type ClinicName = (typeof CLINICS)[number]; // どちらかの医院名 という型
+type ClinicName = (typeof CLINICS)[number];
+
+// ─── 医院ごとの稼働日設定 ─────────────────────────────────
+// 「3ヶ月在庫維持」が目標。医院ごとの週稼働日数から月・3ヶ月の基準を計算します。
+const CLINIC_CONFIG: Record<
+  ClinicName,
+  {
+    daysPerWeek: number;    // 週の稼働日数
+    monthDays: number;      // 1ヶ月あたりの稼働日数（週稼働日 × 52 ÷ 12）
+    twoMonthDays: number;   // 2ヶ月あたり
+    threeMonthDays: number; // 3ヶ月あたり（目標）
+    label: string;          // 表示用テキスト
+  }
+> = {
+  "あつたの森歯科クリニック": {
+    daysPerWeek: 6,
+    monthDays: 26,      // 週6日 × 52週 ÷ 12 ≈ 26日
+    twoMonthDays: 52,
+    threeMonthDays: 78,
+    label: "週6日稼働",
+  },
+  "あかつき台歯科医院": {
+    daysPerWeek: 5,
+    monthDays: 22,      // 週5日 × 52週 ÷ 12 ≈ 22日
+    twoMonthDays: 44,
+    threeMonthDays: 66,
+    label: "週5日稼働",
+  },
+};
 
 // ─── 医院ごとのカラーテーマ ───────────────────────────────
-// Tailwindのクラス名を文字列で管理します
-// ※ テンプレートリテラル（`bg-${color}-50`）は使わない！
-//   → Tailwindは文字列を静的にスキャンするので、完全なクラス名で書く必要があります
+// Tailwindのクラスは文字列リテラルで書く必要があります（動的生成は不可）
 const CLINIC_THEME: Record<
   ClinicName,
   {
-    pageBg: string;      // ページ背景
-    header: string;      // ヘッダー背景
-    addBtn: string;      // 新規登録ボタン
-    tabActive: string;   // 選択中の医院タブ
-    tabInactive: string; // 非選択の医院タブ
-    filterActive: string;   // カテゴリフィルター（選択中）
-    filterInactive: string; // カテゴリフィルター（非選択）
-    badge: string;       // 現在の医院バッジ
+    pageBg: string;
+    header: string;
+    addBtn: string;
+    tabActive: string;
+    tabInactive: string;
+    filterActive: string;
+    filterInactive: string;
+    badge: string;
+    infoBadge: string;
   }
 > = {
   "あつたの森歯科クリニック": {
@@ -39,6 +64,7 @@ const CLINIC_THEME: Record<
     filterActive:   "bg-emerald-600 text-white",
     filterInactive: "bg-white text-gray-600 border border-gray-200 hover:bg-emerald-50",
     badge:          "bg-emerald-100 text-emerald-800 border border-emerald-200",
+    infoBadge:      "bg-emerald-800/30 text-emerald-100 text-xs px-2 py-0.5 rounded",
   },
   "あかつき台歯科医院": {
     pageBg:         "bg-orange-50",
@@ -49,6 +75,7 @@ const CLINIC_THEME: Record<
     filterActive:   "bg-orange-500 text-white",
     filterInactive: "bg-white text-gray-600 border border-gray-200 hover:bg-orange-50",
     badge:          "bg-orange-100 text-orange-800 border border-orange-200",
+    infoBadge:      "bg-orange-800/30 text-orange-100 text-xs px-2 py-0.5 rounded",
   },
 };
 
@@ -57,7 +84,7 @@ interface Material {
   id: number;
   name: string;
   size: string;
-  clinic: string;   // 追加：どの医院の在庫か
+  clinic: string;
   category: string;
   currentStock: number;
   unit: string;
@@ -68,152 +95,181 @@ interface Material {
   updatedAt: string;
 }
 
-// ─── ユーティリティ関数 ───────────────────────────────────
+// ─── 在庫評価ロジック ─────────────────────────────────────
+// 3ヶ月在庫維持が目標。医院ごとの稼働日数基準で4段階評価します。
+// sortOrder: 0=危険（最悪）→ 3=理想（最良）。一覧は昇順ソートで危険が上に来ます。
 
-/** 残り日数を計算する（0除算を防ぐ） */
-function getRemainingDays(stock: number, usage: number): number | null {
-  if (usage <= 0) return null;
-  return Math.floor(stock / usage);
+type EvalLevel = "danger" | "warning" | "caution" | "ideal" | "unknown";
+
+interface StockEval {
+  level: EvalLevel;
+  status: string;
+  months: number | null;
+  remainingDays: number | null;
+  bg: string;
+  text: string;
+  border: string;
+  rowBg: string;
+  statusBadgeBg: string;
+  sortOrder: number;
 }
 
-/** 残り日数に応じた色設定を返す */
-function getDaysBadge(days: number | null) {
-  if (days === null) return { bg: "bg-gray-100",    text: "text-gray-500",   border: "border-gray-200",  rowBg: "",              label: "－",       status: "不明" };
-  if (days < 7)      return { bg: "bg-red-100",     text: "text-red-700",    border: "border-red-300",   rowBg: "bg-red-50/40",  label: `${days}日`, status: "危険" };
-  if (days < 14)     return { bg: "bg-orange-100",  text: "text-orange-700", border: "border-orange-300",rowBg: "bg-orange-50/30",label: `${days}日`, status: "注意" };
-  if (days < 30)     return { bg: "bg-yellow-100",  text: "text-yellow-700", border: "border-yellow-300",rowBg: "",              label: `${days}日`, status: "やや少ない" };
-  return               { bg: "bg-green-100",   text: "text-green-700",  border: "border-green-300", rowBg: "",              label: `${days}日`, status: "十分" };
+function getStockEval(stock: number, usage: number, clinicName: ClinicName): StockEval {
+  if (usage <= 0) {
+    return {
+      level: "unknown", status: "未設定", months: null, remainingDays: null,
+      bg: "bg-gray-100", text: "text-gray-500", border: "border-gray-200",
+      rowBg: "", statusBadgeBg: "bg-gray-200", sortOrder: 4,
+    };
+  }
+
+  const days = Math.floor(stock / usage);
+  const cfg  = CLINIC_CONFIG[clinicName];
+  const months = Math.round((days / cfg.monthDays) * 10) / 10;
+
+  if (days >= cfg.threeMonthDays) {
+    return {
+      level: "ideal", status: "理想", months, remainingDays: days,
+      bg: "bg-green-100", text: "text-green-700", border: "border-green-300",
+      rowBg: "", statusBadgeBg: "bg-green-200", sortOrder: 3,
+    };
+  }
+  if (days >= cfg.twoMonthDays) {
+    return {
+      level: "caution", status: "やや少ない", months, remainingDays: days,
+      bg: "bg-yellow-100", text: "text-yellow-700", border: "border-yellow-300",
+      rowBg: "bg-yellow-50/20", statusBadgeBg: "bg-yellow-200", sortOrder: 2,
+    };
+  }
+  if (days >= cfg.monthDays) {
+    return {
+      level: "warning", status: "注意", months, remainingDays: days,
+      bg: "bg-orange-100", text: "text-orange-700", border: "border-orange-300",
+      rowBg: "bg-orange-50/30", statusBadgeBg: "bg-orange-200", sortOrder: 1,
+    };
+  }
+  return {
+    level: "danger", status: "危険", months, remainingDays: days,
+    bg: "bg-red-100", text: "text-red-700", border: "border-red-300",
+    rowBg: "bg-red-50/40", statusBadgeBg: "bg-red-200", sortOrder: 0,
+  };
 }
 
-/** 重要度の表示設定 */
-const IMPORTANCE_MAP: Record<string, { label: string; className: string }> = {
-  high:   { label: "高", className: "bg-red-100 text-red-700" },
-  medium: { label: "中", className: "bg-yellow-100 text-yellow-700" },
-  low:    { label: "低", className: "bg-green-100 text-green-700" },
-};
-
-/** 材料名+サイズを組み合わせた表示名を返す */
+/** 材料名＋サイズを組み合わせた表示名 */
 function getDisplayName(m: Material): string {
   return m.size ? `${m.name} ${m.size}` : m.name;
 }
 
 /**
- * updatedAt を「人が読みやすい形式」に変換する関数
- *
- * 返り値:
- *   text     … 画面に表示する文字列（「今日」「昨日」「2026/04/14」など）
- *   isToday  … 今日更新されたか
- *   diffDays … 最終更新から何日経過しているか（3以上でグレー表示）
+ * updatedAt を人が読みやすい形式に変換
+ * 今日→「今日」、昨日→「昨日」、それ以前→「YYYY/MM/DD」
  */
 function formatUpdatedAt(dateStr: string): {
   text: string;
   isToday: boolean;
   diffDays: number;
 } {
-  const date = new Date(dateStr); // ISO文字列 → Dateオブジェクト
+  const date = new Date(dateStr);
   const now  = new Date();
-
-  // 「日付だけ」で比較するために、時刻を0時0分0秒にそろえる
   const dateDay  = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const todayDay = new Date(now.getFullYear(),  now.getMonth(),  now.getDate());
+  const diffDays = Math.round((todayDay.getTime() - dateDay.getTime()) / (1000 * 60 * 60 * 24));
 
-  // 経過日数（ミリ秒 → 日）
-  const diffMs   = todayDay.getTime() - dateDay.getTime();
-  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-  // 表示テキストを決定
   let text: string;
-  if (diffDays === 0) {
-    text = "今日";
-  } else if (diffDays === 1) {
-    text = "昨日";
-  } else {
-    // 2日以上前は「YYYY/MM/DD」形式
+  if (diffDays === 0)      text = "今日";
+  else if (diffDays === 1) text = "昨日";
+  else {
     const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, "0"); // 1→"01", 10→"10"
+    const m = String(date.getMonth() + 1).padStart(2, "0");
     const d = String(date.getDate()).padStart(2, "0");
     text = `${y}/${m}/${d}`;
   }
-
   return { text, isToday: diffDays === 0, diffDays };
 }
 
 // ─── メインコンポーネント ─────────────────────────────────
 export default function Home() {
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingMaterial, setEditingMaterial] = useState<Material | null>(null);
-  const [selectedClinic, setSelectedClinic] = useState<ClinicName>(CLINICS[0]);
+  const [materials,        setMaterials]        = useState<Material[]>([]);
+  const [loading,          setLoading]          = useState(true);
+  const [isModalOpen,      setIsModalOpen]      = useState(false);
+  const [editingMaterial,  setEditingMaterial]  = useState<Material | null>(null);
+  const [selectedClinic,   setSelectedClinic]   = useState<ClinicName>(CLINICS[0]);
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
-  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [deleteConfirmId,  setDeleteConfirmId]  = useState<number | null>(null);
 
-  // 現在の医院テーマを取得（ボタン・背景色の設定）
-  const theme = CLINIC_THEME[selectedClinic];
+  const theme  = CLINIC_THEME[selectedClinic];
+  const config = CLINIC_CONFIG[selectedClinic];
 
-  // ── APIコール ────────────────────────────────────────────
+  // ── API ────────────────────────────────────────────────
   async function fetchMaterials(clinic: string) {
     setLoading(true);
-    // URLパラメータ ?clinic=医院名 で絞り込み
-    const res = await fetch(`/api/materials?clinic=${encodeURIComponent(clinic)}`);
+    const res  = await fetch(`/api/materials?clinic=${encodeURIComponent(clinic)}`);
     const data = await res.json();
     setMaterials(data);
     setLoading(false);
   }
 
-  // 医院が変わるたびに自動でデータ取得
   useEffect(() => {
     fetchMaterials(selectedClinic);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedClinic]);
 
-  // ── イベントハンドラ ─────────────────────────────────────
-
-  /** 医院切り替え（カテゴリフィルターもリセット） */
+  // ── イベントハンドラ ───────────────────────────────────
   function handleClinicChange(clinic: ClinicName) {
     setSelectedClinic(clinic);
     setSelectedCategory("all");
   }
 
-  /** 削除 */
   async function handleDelete(id: number) {
     await fetch(`/api/materials/${id}`, { method: "DELETE" });
     setDeleteConfirmId(null);
     fetchMaterials(selectedClinic);
   }
 
-  /** 編集モーダルを開く */
   function handleEdit(material: Material) {
     setEditingMaterial(material);
     setIsModalOpen(true);
   }
 
-  /** 新規登録モーダルを開く */
   function handleAddNew() {
     setEditingMaterial(null);
     setIsModalOpen(true);
   }
 
-  /** 登録・更新の保存 */
-  async function handleSave(data: Omit<Material, "id" | "createdAt" | "updatedAt">) {
+  /**
+   * 保存処理
+   * keepOpen=true のとき（「保存して次を入力」）はモーダルを閉じない
+   */
+  async function handleSave(
+    data: Omit<Material, "id" | "createdAt" | "updatedAt">,
+    keepOpen = false
+  ) {
     if (editingMaterial) {
       await fetch(`/api/materials/${editingMaterial.id}`, {
-        method: "PUT",
+        method:  "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
+        body:    JSON.stringify(data),
       });
     } else {
       await fetch("/api/materials", {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
+        body:    JSON.stringify(data),
       });
     }
-    setIsModalOpen(false);
-    fetchMaterials(selectedClinic);
+
+    fetchMaterials(selectedClinic); // 一覧をバックグラウンドで更新
+
+    if (!keepOpen) {
+      setIsModalOpen(false);
+      setEditingMaterial(null);
+    } else {
+      // 「保存して次を入力」の場合は編集モードを解除（新規入力モードに戻す）
+      setEditingMaterial(null);
+    }
   }
 
-  // ── フィルター・ソート ────────────────────────────────────
+  // ── フィルター ────────────────────────────────────────
   const categories = [
     "all",
     ...Array.from(new Set(materials.map((m) => m.category))).sort(),
@@ -224,40 +280,50 @@ export default function Home() {
       ? materials
       : materials.filter((m) => m.category === selectedCategory);
 
+  // ── ソート：評価が悪い順 → 同評価内は残り日数が少ない順 ──
+  // sortOrder: 0=危険 1=注意 2=やや少ない 3=理想 4=未設定
   const sortedMaterials = [...filteredMaterials].sort((a, b) => {
-    const dA = getRemainingDays(a.currentStock, a.dailyUsage);
-    const dB = getRemainingDays(b.currentStock, b.dailyUsage);
-    if (dA === null && dB === null) return 0;
-    if (dA === null) return 1;
-    if (dB === null) return -1;
-    return dA - dB;
+    const eA = getStockEval(a.currentStock, a.dailyUsage, selectedClinic);
+    const eB = getStockEval(b.currentStock, b.dailyUsage, selectedClinic);
+    if (eA.sortOrder !== eB.sortOrder) return eA.sortOrder - eB.sortOrder;
+    return (eA.remainingDays ?? 99999) - (eB.remainingDays ?? 99999);
   });
 
-  // ── サマリー集計 ─────────────────────────────────────────
-  const criticalCount = materials.filter((m) => {
-    const d = getRemainingDays(m.currentStock, m.dailyUsage);
-    return d !== null && d < 7;
-  }).length;
+  // ── ダッシュボード集計（全材料対象・フィルターなし） ───
+  const allEvals        = materials.map((m) => getStockEval(m.currentStock, m.dailyUsage, selectedClinic));
+  const dangerCount     = allEvals.filter((e) => e.level === "danger").length;
+  const belowThreeMo    = allEvals.filter((e) => e.level !== "ideal" && e.level !== "unknown").length;
+  const idealCount      = allEvals.filter((e) => e.level === "ideal").length;
+  const achieveRate     = materials.length > 0
+    ? Math.round((idealCount / materials.length) * 100) : 0;
 
-  const warningCount = materials.filter((m) => {
-    const d = getRemainingDays(m.currentStock, m.dailyUsage);
-    return d !== null && d >= 7 && d < 14;
-  }).length;
+  // 最も逼迫している材料（全材料を評価順にソートして先頭を取る）
+  const mostCritical     = [...materials].sort((a, b) => {
+    const eA = getStockEval(a.currentStock, a.dailyUsage, selectedClinic);
+    const eB = getStockEval(b.currentStock, b.dailyUsage, selectedClinic);
+    if (eA.sortOrder !== eB.sortOrder) return eA.sortOrder - eB.sortOrder;
+    return (eA.remainingDays ?? 99999) - (eB.remainingDays ?? 99999);
+  })[0];
+  const mostCriticalEval = mostCritical
+    ? getStockEval(mostCritical.currentStock, mostCritical.dailyUsage, selectedClinic)
+    : null;
 
-  // ── レンダリング ─────────────────────────────────────────
+  // 達成率カードの色
+  const rateTextColor = achieveRate >= 80 ? "text-green-600" : achieveRate >= 60 ? "text-yellow-600" : "text-orange-600";
+  const rateBg        = achieveRate >= 80 ? "bg-green-50 border-green-100" : achieveRate >= 60 ? "bg-yellow-50 border-yellow-100" : "bg-orange-50 border-orange-100";
+
+  // ─── レンダリング ───────────────────────────────────────
   return (
-    // ページ全体の背景色：医院によって切り替え（transition で滑らかに）
     <div className={`min-h-screen transition-colors duration-300 ${theme.pageBg}`}>
 
       {/* ===== ヘッダー ===== */}
       <header className={`${theme.header} text-white shadow-lg transition-colors duration-300`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4">
 
-          {/* タイトル行 */}
           <div className="flex items-center justify-between mb-3">
             <div>
               <h1 className="text-2xl font-bold tracking-tight">歯科在庫管理</h1>
-              <p className="text-white/70 text-sm mt-0.5">医院運営可能日数の見える化</p>
+              <p className="text-white/70 text-sm mt-0.5">3ヶ月在庫維持の見える化</p>
             </div>
             <button
               onClick={handleAddNew}
@@ -267,17 +333,14 @@ export default function Home() {
             </button>
           </div>
 
-          {/* 医院切り替えタブ
-              bg-black/20 の黒半透明コンテナの中にタブを並べています */}
+          {/* 医院切り替えタブ */}
           <div className="flex gap-1 bg-black/20 rounded-xl p-1 w-fit">
             {CLINICS.map((clinic) => (
               <button
                 key={clinic}
                 onClick={() => handleClinicChange(clinic)}
                 className={`px-5 py-2 rounded-lg text-sm transition-all duration-200 ${
-                  selectedClinic === clinic
-                    ? theme.tabActive     // 選択中：白背景＋テーマ色テキスト
-                    : theme.tabInactive   // 非選択：透明背景＋薄いテキスト
+                  selectedClinic === clinic ? theme.tabActive : theme.tabInactive
                 }`}
               >
                 {clinic}
@@ -289,40 +352,96 @@ export default function Home() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4">
 
-        {/* ===== 現在の医院表示バナー ===== */}
+        {/* ===== 医院情報バナー ===== */}
         <div className="bg-white rounded-xl px-4 py-3 shadow-sm border border-gray-100 flex items-center gap-3 flex-wrap">
           <span className="text-gray-500 text-sm">表示中：</span>
-          {/* 医院名バッジ：テーマ色で表示 */}
           <span className={`px-3 py-1 rounded-full text-sm font-semibold border ${theme.badge}`}>
             {selectedClinic}
           </span>
-          <span className="text-gray-300 text-sm">|</span>
-          <span className="text-gray-500 text-sm">{materials.length}件の材料を管理中</span>
+          <span className={theme.infoBadge}>
+            {config.label} | 3ヶ月基準：{config.threeMonthDays}稼働日
+          </span>
+          <span className="text-gray-400 text-sm ml-auto">{materials.length}件の材料を管理中</span>
         </div>
 
-        {/* ===== サマリーカード（選択中の医院のデータのみ集計） ===== */}
-        <div className="grid grid-cols-3 gap-4">
+        {/* ===== ダッシュボード ===== */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+
+          {/* 登録材料数 */}
           <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
-            <div className="text-3xl font-bold text-gray-800">{materials.length}</div>
+            <div className="text-3xl font-black text-gray-800">{materials.length}</div>
             <div className="text-gray-500 text-sm mt-1">登録材料数</div>
           </div>
-          <div className="bg-red-50 rounded-xl p-4 shadow-sm border border-red-100">
-            <div className="text-3xl font-bold text-red-600">{criticalCount}</div>
-            <div className="text-red-500 text-sm mt-1">危険（7日未満）</div>
+
+          {/* 3ヶ月未満 */}
+          <div className="bg-yellow-50 rounded-xl p-4 shadow-sm border border-yellow-100">
+            <div className="text-3xl font-black text-yellow-600">{belowThreeMo}</div>
+            <div className="text-yellow-600 text-sm mt-1">3ヶ月未満の材料</div>
           </div>
-          <div className="bg-orange-50 rounded-xl p-4 shadow-sm border border-orange-100">
-            <div className="text-3xl font-bold text-orange-600">{warningCount}</div>
-            <div className="text-orange-500 text-sm mt-1">注意（7〜13日）</div>
+
+          {/* 危険（1ヶ月未満） */}
+          <div className="bg-red-50 rounded-xl p-4 shadow-sm border border-red-100">
+            <div className="text-3xl font-black text-red-600">{dangerCount}</div>
+            <div className="text-red-500 text-sm mt-1">危険！1ヶ月未満</div>
+          </div>
+
+          {/* 3ヶ月達成率 */}
+          <div className={`rounded-xl p-4 shadow-sm border ${rateBg}`}>
+            <div className={`text-3xl font-black ${rateTextColor}`}>{achieveRate}%</div>
+            <div className={`text-sm mt-1 ${rateTextColor}`}>3ヶ月在庫達成率</div>
+            <div className="text-xs text-gray-400 mt-0.5">{idealCount}/{materials.length}件達成</div>
           </div>
         </div>
 
-        {/* ===== 色の凡例 ===== */}
-        <div className="bg-white rounded-xl p-3 shadow-sm border border-gray-100 flex items-center gap-5 flex-wrap text-sm">
-          <span className="text-gray-500 font-medium">残り日数の目安：</span>
-          <span className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-red-100    border border-red-300    inline-block shrink-0" /><span className="text-red-700">   7日未満　危険</span></span>
-          <span className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-orange-100 border border-orange-300 inline-block shrink-0" /><span className="text-orange-700">7〜13日　注意</span></span>
-          <span className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-yellow-100 border border-yellow-300 inline-block shrink-0" /><span className="text-yellow-700">14〜29日　やや少ない</span></span>
-          <span className="flex items-center gap-1.5"><span className="w-3.5 h-3.5 rounded bg-green-100  border border-green-300  inline-block shrink-0" /><span className="text-green-700">30日以上　十分</span></span>
+        {/* 最も逼迫している材料のバナー */}
+        {mostCritical && mostCriticalEval && (
+          mostCriticalEval.level === "ideal" ? (
+            <div className="bg-green-50 rounded-xl px-4 py-3 border border-green-200 flex items-center gap-2">
+              <span className="text-green-500 text-lg">✓</span>
+              <span className="text-green-700 font-medium text-sm">
+                すべての材料が3ヶ月以上の在庫を維持しています！
+              </span>
+            </div>
+          ) : (
+            <div className={`rounded-xl px-4 py-3 border flex items-center gap-3 flex-wrap ${mostCriticalEval.bg} ${mostCriticalEval.border}`}>
+              <span className={`text-xs font-bold px-2 py-1 rounded-full ${mostCriticalEval.statusBadgeBg} ${mostCriticalEval.text}`}>
+                {mostCriticalEval.status}
+              </span>
+              <span className={`font-bold ${mostCriticalEval.text}`}>
+                最も逼迫：{getDisplayName(mostCritical)}
+              </span>
+              <span className={`text-sm ${mostCriticalEval.text}`}>
+                残り {mostCriticalEval.remainingDays}稼働日
+                （{mostCriticalEval.months}ヶ月分）
+              </span>
+              {mostCriticalEval.level === "danger" && (
+                <span className="text-red-600 text-xs font-bold ml-auto">⚠ 至急発注を確認してください</span>
+              )}
+            </div>
+          )
+        )}
+
+        {/* ===== 色の凡例（新ロジック・医院ごとに数値が変わる） ===== */}
+        <div className="bg-white rounded-xl p-3 shadow-sm border border-gray-100 flex items-center gap-4 flex-wrap">
+          <span className="text-gray-500 font-medium text-xs whitespace-nowrap">
+            在庫評価（{config.label}基準）：
+          </span>
+          <span className="flex items-center gap-1 text-xs">
+            <span className="w-3 h-3 rounded bg-red-100 border border-red-300 shrink-0 inline-block" />
+            <span className="text-red-700">危険（{config.monthDays}日未満・1ヶ月未満）</span>
+          </span>
+          <span className="flex items-center gap-1 text-xs">
+            <span className="w-3 h-3 rounded bg-orange-100 border border-orange-300 shrink-0 inline-block" />
+            <span className="text-orange-700">注意（1〜2ヶ月）</span>
+          </span>
+          <span className="flex items-center gap-1 text-xs">
+            <span className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300 shrink-0 inline-block" />
+            <span className="text-yellow-700">やや少ない（2〜3ヶ月）</span>
+          </span>
+          <span className="flex items-center gap-1 text-xs">
+            <span className="w-3 h-3 rounded bg-green-100 border border-green-300 shrink-0 inline-block" />
+            <span className="text-green-700">理想（{config.threeMonthDays}日以上・3ヶ月以上）</span>
+          </span>
         </div>
 
         {/* ===== カテゴリフィルター ===== */}
@@ -332,9 +451,7 @@ export default function Home() {
               key={cat}
               onClick={() => setSelectedCategory(cat)}
               className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
-                selectedCategory === cat
-                  ? theme.filterActive
-                  : theme.filterInactive
+                selectedCategory === cat ? theme.filterActive : theme.filterInactive
               }`}
             >
               {cat === "all" ? "すべて" : cat}
@@ -352,144 +469,148 @@ export default function Home() {
           <div className="text-center py-16 text-gray-400">読み込み中...</div>
         ) : (
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-100">
-                <tr>
-                  <th className="text-left   px-4 py-3 font-semibold text-gray-600">材料名</th>
-                  <th className="text-left   px-4 py-3 font-semibold text-gray-600">カテゴリ</th>
-                  <th className="text-center px-4 py-3 font-semibold text-gray-600">残り日数 ▲</th>
-                  <th className="text-center px-4 py-3 font-semibold text-gray-600">最終更新日</th>
-                  <th className="text-right  px-4 py-3 font-semibold text-gray-600">現在庫数</th>
-                  <th className="text-right  px-4 py-3 font-semibold text-gray-600">1日使用量</th>
-                  <th className="text-center px-4 py-3 font-semibold text-gray-600">重要度</th>
-                  <th className="text-center px-4 py-3 font-semibold text-gray-600">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {sortedMaterials.map((material) => {
-                  const days  = getRemainingDays(material.currentStock, material.dailyUsage);
-                  const badge = getDaysBadge(days);
-                  const imp     = IMPORTANCE_MAP[material.importance] ?? IMPORTANCE_MAP.medium;
-                  const updated = formatUpdatedAt(material.updatedAt); // 日付フォーマット
-                  const isDeleting = deleteConfirmId === material.id;
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[680px]">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="text-left   px-4 py-3 font-semibold text-gray-600">材料名</th>
+                    <th className="text-left   px-3 py-3 font-semibold text-gray-600">カテゴリ</th>
+                    <th className="text-center px-3 py-3 font-semibold text-gray-600">
+                      在庫評価 ▲
+                      <div className="text-xs font-normal text-gray-400">稼働日数 / ヶ月数</div>
+                    </th>
+                    <th className="text-center px-3 py-3 font-semibold text-gray-600">最終更新日</th>
+                    <th className="text-right  px-3 py-3 font-semibold text-gray-600">現在庫数</th>
+                    <th className="text-right  px-3 py-3 font-semibold text-gray-600">1日使用量</th>
+                    <th className="text-center px-3 py-3 font-semibold text-gray-600">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {sortedMaterials.map((material) => {
+                    const ev         = getStockEval(material.currentStock, material.dailyUsage, selectedClinic);
+                    const updated    = formatUpdatedAt(material.updatedAt);
+                    const isDeleting = deleteConfirmId === material.id;
 
-                  return (
-                    <tr
-                      key={material.id}
-                      className={`hover:bg-gray-50/80 transition-colors ${badge.rowBg}`}
-                    >
-                      {/* 材料名（名前＋サイズを組み合わせ） */}
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-gray-800">{getDisplayName(material)}</div>
-                        {material.notes && (
-                          <div className="text-xs text-gray-400 mt-0.5 truncate max-w-xs">
-                            {material.notes}
-                          </div>
-                        )}
-                      </td>
+                    return (
+                      <tr
+                        key={material.id}
+                        className={`hover:bg-gray-50/80 transition-colors ${ev.rowBg}`}
+                      >
+                        {/* 材料名 */}
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-gray-800">{getDisplayName(material)}</div>
+                          {material.notes && (
+                            <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[200px]">
+                              {material.notes}
+                            </div>
+                          )}
+                          {material.importance === "high" && (
+                            <span className="inline-block text-[10px] px-1.5 py-0.5 bg-red-100 text-red-600 rounded mt-0.5 font-medium">
+                              重要
+                            </span>
+                          )}
+                        </td>
 
-                      {/* カテゴリ */}
-                      <td className="px-4 py-3 text-gray-600">{material.category}</td>
+                        {/* カテゴリ */}
+                        <td className="px-3 py-3 text-gray-500 text-xs whitespace-nowrap">
+                          {material.category}
+                        </td>
 
-                      {/* 残り日数バッジ */}
-                      <td className="px-4 py-3 text-center">
-                        <span
-                          className={`inline-flex flex-col items-center px-3 py-1 rounded-lg text-sm font-bold border ${badge.bg} ${badge.text} ${badge.border}`}
-                        >
-                          {badge.label}
-                          <span className="text-xs font-normal opacity-70">{badge.status}</span>
-                        </span>
-                      </td>
+                        {/* 在庫評価バッジ（メインの見せ場）*/}
+                        <td className="px-3 py-3 text-center">
+                          {ev.remainingDays !== null ? (
+                            <div className={`inline-flex flex-col items-center px-3 py-2 rounded-xl border ${ev.bg} ${ev.text} ${ev.border}`}>
+                              <span className="text-2xl font-black leading-none">{ev.remainingDays}</span>
+                              <span className="text-[10px] opacity-60 leading-tight">稼働日</span>
+                              <span className="text-sm font-bold mt-0.5">{ev.months}ヶ月分</span>
+                              <span className={`text-[10px] font-semibold mt-1 px-1.5 py-0.5 rounded-full ${ev.statusBadgeBg}`}>
+                                {ev.status}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 text-xs">－</span>
+                          )}
+                        </td>
 
-                      {/* 最終更新日
-                          今日     → 青バッジ「今日」
-                          1〜2日前 → 通常グレー
-                          3日以上前 → 薄いグレー + 「要確認」表示 */}
-                      <td className="px-4 py-3 text-center whitespace-nowrap">
-                        {updated.isToday ? (
-                          // 今日更新された場合：青いバッジで目立たせる
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">
-                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" />
-                            今日
-                          </span>
-                        ) : updated.diffDays >= 3 ? (
-                          // 3日以上前：グレーアウトして要確認を促す
-                          <span className="text-gray-400 text-xs">
-                            <span className="block">{updated.text}</span>
-                            <span className="text-gray-300">要確認</span>
-                          </span>
-                        ) : (
-                          // 昨日〜2日前：通常表示
-                          <span className="text-gray-500 text-xs">{updated.text}</span>
-                        )}
-                      </td>
+                        {/* 最終更新日 */}
+                        <td className="px-3 py-3 text-center whitespace-nowrap">
+                          {updated.isToday ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" />
+                              今日
+                            </span>
+                          ) : updated.diffDays >= 3 ? (
+                            <span className="text-gray-400 text-xs">
+                              <span className="block">{updated.text}</span>
+                              <span className="text-gray-300">要確認</span>
+                            </span>
+                          ) : (
+                            <span className="text-gray-500 text-xs">{updated.text}</span>
+                          )}
+                        </td>
 
-                      {/* 現在庫数 */}
-                      <td className="px-4 py-3 text-right">
-                        <span className="font-semibold text-gray-800">{material.currentStock}</span>
-                        <span className="text-gray-400 ml-1">{material.unit}</span>
-                      </td>
+                        {/* 現在庫数 */}
+                        <td className="px-3 py-3 text-right">
+                          <span className="font-semibold text-gray-800">{material.currentStock}</span>
+                          <span className="text-gray-400 text-xs ml-1">{material.unit}</span>
+                        </td>
 
-                      {/* 1日使用量 */}
-                      <td className="px-4 py-3 text-right">
-                        <span className="text-gray-600">{material.dailyUsage}</span>
-                        <span className="text-gray-400 ml-1">{material.unit}/日</span>
-                      </td>
+                        {/* 1日使用量 */}
+                        <td className="px-3 py-3 text-right">
+                          <span className="text-gray-600 text-xs">{material.dailyUsage}</span>
+                          <span className="text-gray-400 text-xs ml-1">{material.unit}/日</span>
+                        </td>
 
-                      {/* 重要度 */}
-                      <td className="px-4 py-3 text-center">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${imp.className}`}>
-                          {imp.label}
-                        </span>
-                      </td>
+                        {/* 操作 */}
+                        <td className="px-3 py-3 text-center">
+                          {isDeleting ? (
+                            <div className="flex flex-col items-center gap-1">
+                              <span className="text-xs text-gray-500">削除しますか?</span>
+                              <div className="flex gap-1">
+                                <button
+                                  onClick={() => handleDelete(material.id)}
+                                  className="text-xs bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600"
+                                >削除</button>
+                                <button
+                                  onClick={() => setDeleteConfirmId(null)}
+                                  className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-300"
+                                >取消</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-center gap-3">
+                              <button
+                                onClick={() => handleEdit(material)}
+                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors"
+                              >編集</button>
+                              <button
+                                onClick={() => setDeleteConfirmId(material.id)}
+                                className="text-red-500 hover:text-red-700 font-medium transition-colors"
+                              >削除</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
 
-                      {/* 操作ボタン */}
-                      <td className="px-4 py-3 text-center">
-                        {isDeleting ? (
-                          <div className="flex items-center justify-center gap-1 flex-wrap">
-                            <span className="text-xs text-gray-500">削除しますか?</span>
-                            <button
-                              onClick={() => handleDelete(material.id)}
-                              className="text-xs bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 transition-colors"
-                            >削除</button>
-                            <button
-                              onClick={() => setDeleteConfirmId(null)}
-                              className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-300 transition-colors"
-                            >取消</button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-center gap-3">
-                            <button
-                              onClick={() => handleEdit(material)}
-                              className="text-blue-600 hover:text-blue-800 font-medium transition-colors"
-                            >編集</button>
-                            <button
-                              onClick={() => setDeleteConfirmId(material.id)}
-                              className="text-red-500 hover:text-red-700 font-medium transition-colors"
-                            >削除</button>
-                          </div>
-                        )}
+                  {sortedMaterials.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="text-center py-12 text-gray-400">
+                        {selectedCategory === "all"
+                          ? "材料が登録されていません"
+                          : `「${selectedCategory}」カテゴリの材料はありません`}
                       </td>
                     </tr>
-                  );
-                })}
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-                {sortedMaterials.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="text-center py-12 text-gray-400">
-                      {selectedCategory === "all"
-                        ? "材料が登録されていません"
-                        : `「${selectedCategory}」カテゴリの材料はありません`}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-
-            {/* テーブルフッター */}
             <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-400 text-right">
               {filteredMaterials.length}件表示
               {selectedCategory !== "all" && ` (全${materials.length}件中)`}
+              　※ 評価は{config.label}（3ヶ月目標：{config.threeMonthDays}稼働日）基準
             </div>
           </div>
         )}
@@ -499,9 +620,12 @@ export default function Home() {
       {isModalOpen && (
         <MaterialModal
           material={editingMaterial}
-          defaultClinic={selectedClinic}  // 現在の医院を初期値として渡す
+          defaultClinic={selectedClinic}
           onSave={handleSave}
-          onClose={() => setIsModalOpen(false)}
+          onClose={() => {
+            setIsModalOpen(false);
+            setEditingMaterial(null);
+          }}
         />
       )}
     </div>

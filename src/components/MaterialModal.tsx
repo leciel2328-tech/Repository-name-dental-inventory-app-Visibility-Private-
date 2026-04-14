@@ -2,8 +2,6 @@
 
 import { useState, useEffect } from "react";
 
-// ─── 医院リスト（page.tsx と同じ定数を使う）───────────────
-// 将来的に増える場合は、別ファイル（constants.ts など）に切り出すと管理しやすくなります
 const CLINICS = [
   "あつたの森歯科クリニック",
   "あかつき台歯科医院",
@@ -24,33 +22,34 @@ interface Material {
 }
 
 interface Props {
-  material: Material | null;      // null = 新規登録、値 = 編集
-  defaultClinic: string;          // 現在選択中の医院（新規登録時の初期値）
-  onSave: (data: Omit<Material, "id">) => void;
+  material: Material | null;
+  defaultClinic: string;
+  // keepOpen=true のとき「保存して次を入力」→ モーダルを閉じない
+  onSave: (data: Omit<Material, "id">, keepOpen?: boolean) => void;
   onClose: () => void;
 }
 
-// カテゴリの選択肢
-const CATEGORIES = ["麻酔", "衛生用品", "滅菌・消毒", "その他"];
+// ─── カテゴリ（新分類） ──────────────────────────────────
+const CATEGORIES = ["麻酔関連", "衛生材料", "滅菌関連", "その他"];
 
-// 単位の選択肢
-const UNITS = ["本", "枚", "個", "双", "kg", "g", "ml", "袋", "箱", "セット", "パック"];
+// ─── 単位（「双」を削除） ────────────────────────────────
+const UNITS_QUICK = ["箱", "個", "本", "枚", "パック"];  // ワンクリック選択用
+const UNITS_ALL   = ["箱", "個", "本", "枚", "パック", "袋", "セット", "kg", "g", "ml"]; // ドロップダウン用
+
+// ─── フォームの初期値 ────────────────────────────────────
+const INITIAL_FORM = {
+  name: "", size: "", clinic: "",
+  category: "衛生材料", currentStock: "", unit: "箱",
+  dailyUsage: "", importance: "medium", notes: "",
+};
 
 // ─── コンポーネント ───────────────────────────────────────
 export default function MaterialModal({ material, defaultClinic, onSave, onClose }: Props) {
-  const [form, setForm] = useState({
-    name:         "",
-    size:         "",
-    clinic:       defaultClinic,   // 現在の医院を初期値にセット
-    category:     "衛生用品",
-    currentStock: "",
-    unit:         "個",
-    dailyUsage:   "",
-    importance:   "medium",
-    notes:        "",
-  });
+  const [form, setForm] = useState({ ...INITIAL_FORM, clinic: defaultClinic });
+  // 「保存して次を入力」で連続保存した件数（フィードバック表示用）
+  const [savedCount, setSavedCount] = useState(0);
 
-  // 編集モード: 既存データをフォームにセット
+  // 編集モード：既存データをフォームにセット
   useEffect(() => {
     if (material) {
       setForm({
@@ -73,9 +72,8 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    onSave({
+  function getFormData() {
+    return {
       name:         form.name.trim(),
       size:         form.size.trim(),
       clinic:       form.clinic,
@@ -85,32 +83,55 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
       dailyUsage:   parseFloat(form.dailyUsage)   || 0,
       importance:   form.importance,
       notes:        form.notes.trim(),
-    });
+    };
   }
 
-  // モーダル外クリックで閉じる
+  /**
+   * 保存処理
+   * keepOpen=false → 通常保存、モーダルを閉じる（「保存して閉じる」）
+   * keepOpen=true  → 保存後もモーダルを開いたままフォームをリセット（「保存して次を入力」）
+   */
+  function handleSubmit(keepOpen: boolean) {
+    onSave(getFormData(), keepOpen);
+
+    if (keepOpen) {
+      setSavedCount((c) => c + 1);
+      // 医院・カテゴリ・単位・重要度は維持し、入力値だけリセット
+      setForm((prev) => ({
+        ...INITIAL_FORM,
+        clinic:     prev.clinic,
+        category:   prev.category,
+        unit:       prev.unit,
+        importance: prev.importance,
+      }));
+    }
+  }
+
   function handleBackdropClick(e: React.MouseEvent) {
     if (e.target === e.currentTarget) onClose();
   }
 
-  // 残り日数のリアルタイムプレビュー
+  // 残り稼働日数のリアルタイムプレビュー
   const previewDays =
     parseFloat(form.dailyUsage) > 0
       ? Math.floor(parseFloat(form.currentStock) / parseFloat(form.dailyUsage))
       : null;
 
+  // プレビューの色（医院の稼働日基準で色分け）
+  const clinicMonthDays = form.clinic.includes("あつた") ? 26 : 22;
   function getPreviewColor(days: number | null) {
     if (days === null) return "text-gray-400";
-    if (days < 7)  return "text-red-600 font-bold";
-    if (days < 14) return "text-orange-600 font-bold";
-    if (days < 30) return "text-yellow-600";
-    return "text-green-600";
+    if (days < clinicMonthDays)       return "text-red-600 font-bold";
+    if (days < clinicMonthDays * 2)   return "text-orange-600 font-bold";
+    if (days < clinicMonthDays * 3)   return "text-yellow-600";
+    return "text-green-600 font-bold";
   }
+  const previewMonths = previewDays !== null
+    ? (previewDays / clinicMonthDays).toFixed(1)
+    : null;
 
-  // 表示名プレビュー（名前＋サイズ）
-  const displayNamePreview = form.size
-    ? `${form.name} ${form.size}`
-    : form.name;
+  const displayNamePreview = form.size ? `${form.name} ${form.size}` : form.name;
+  const isEditMode = material !== null;
 
   return (
     <div
@@ -123,21 +144,29 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
         <div className="p-6 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white rounded-t-2xl z-10">
           <div>
             <h2 className="text-xl font-bold text-gray-800">
-              {material ? "材料を編集" : "材料を新規登録"}
+              {isEditMode ? "材料を編集" : "材料を新規登録"}
             </h2>
             {form.name && (
               <p className="text-sm text-gray-400 mt-0.5">
                 表示名：<span className="text-blue-600 font-medium">{displayNamePreview}</span>
               </p>
             )}
+            {/* 連続保存時のフィードバック */}
+            {savedCount > 0 && (
+              <p className="text-sm text-green-600 font-semibold mt-0.5">
+                ✓ {savedCount}件保存済み — 続けて入力できます
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
         </div>
 
-        {/* フォーム */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form
+          onSubmit={(e) => { e.preventDefault(); handleSubmit(false); }}
+          className="p-6 space-y-4"
+        >
 
-          {/* ── 医院選択（必須） ── */}
+          {/* ── 医院選択 ── */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               医院 <span className="text-red-500">*</span>
@@ -146,26 +175,38 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
               {CLINICS.map((clinic) => (
                 <label
                   key={clinic}
-                  className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors text-sm ${
+                  className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border cursor-pointer text-sm transition-colors ${
                     form.clinic === clinic
                       ? "border-blue-500 bg-blue-50 text-blue-700 font-medium"
                       : "border-gray-200 hover:bg-gray-50 text-gray-600"
                   }`}
                 >
-                  <input
-                    type="radio"
-                    name="clinic"
-                    value={clinic}
-                    checked={form.clinic === clinic}
-                    onChange={handleChange}
-                    className="sr-only"  // ラジオボタン本体は非表示にしてラベル全体をクリック可能にする
-                  />
-                  <span className={`w-3 h-3 rounded-full border-2 shrink-0 ${
-                    form.clinic === clinic
-                      ? "border-blue-500 bg-blue-500"
-                      : "border-gray-300"
-                  }`} />
+                  <input type="radio" name="clinic" value={clinic} checked={form.clinic === clinic} onChange={handleChange} className="sr-only" />
+                  <span className={`w-3 h-3 rounded-full border-2 shrink-0 ${form.clinic === clinic ? "border-blue-500 bg-blue-500" : "border-gray-300"}`} />
                   {clinic}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* ── カテゴリ（ラジオボタン選択） ── */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              カテゴリ <span className="text-red-500">*</span>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {CATEGORIES.map((cat) => (
+                <label
+                  key={cat}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-sm transition-colors ${
+                    form.category === cat
+                      ? "border-blue-500 bg-blue-50 text-blue-700 font-medium"
+                      : "border-gray-200 hover:bg-gray-50 text-gray-600"
+                  }`}
+                >
+                  <input type="radio" name="category" value={cat} checked={form.category === cat} onChange={handleChange} className="sr-only" />
+                  <span className={`w-3 h-3 rounded-full border-2 shrink-0 ${form.category === cat ? "border-blue-500 bg-blue-500" : "border-gray-300"}`} />
+                  {cat}
                 </label>
               ))}
             </div>
@@ -181,6 +222,7 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
               value={form.name}
               onChange={handleChange}
               required
+              autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="例: グローブ、滅菌パック、浸潤麻酔"
             />
@@ -190,14 +232,14 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               サイズ・規格
-              <span className="ml-1 text-xs text-gray-400 font-normal">（任意 — サイズ展開がある場合）</span>
+              <span className="ml-1 text-xs text-gray-400 font-normal">（任意 — S/M/Lなど）</span>
             </label>
             <input
               name="size"
               value={form.size}
               onChange={handleChange}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="例: SS / S / L / M / MS / 27G"
+              placeholder="例: SS / S / M / L / 27G"
             />
             {form.size && (
               <p className="text-xs text-gray-400 mt-1">
@@ -206,59 +248,48 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
             )}
           </div>
 
-          {/* ── カテゴリ・重要度 ── */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                カテゴリ <span className="text-red-500">*</span>
-              </label>
-              <select
-                name="category"
-                value={form.category}
-                onChange={handleChange}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">重要度</label>
-              <select
-                name="importance"
-                value={form.importance}
-                onChange={handleChange}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="high">高（必須材料）</option>
-                <option value="medium">中（通常材料）</option>
-                <option value="low">低（あれば良い）</option>
-              </select>
-            </div>
-          </div>
-
-          {/* ── 現在庫数・単位 ── */}
+          {/* ── 現在庫数 ＋ 単位 ── */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               現在庫数 <span className="text-red-500">*</span>
             </label>
-            <div className="flex">
+            <div className="flex gap-2 items-start flex-wrap">
               <input
                 name="currentStock"
                 type="number" min="0" step="any"
                 value={form.currentStock}
                 onChange={handleChange}
                 required
-                className="flex-1 border border-r-0 border-gray-300 rounded-l-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-28 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="0"
               />
-              <select
-                name="unit"
-                value={form.unit}
-                onChange={handleChange}
-                className="border border-gray-300 rounded-r-lg px-2 py-2 text-sm bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
-              </select>
+              {/* よく使う単位のクイック選択ボタン */}
+              <div className="flex gap-1 flex-wrap flex-1">
+                {UNITS_QUICK.map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    onClick={() => setForm((prev) => ({ ...prev, unit: u }))}
+                    className={`px-3 py-2 rounded-lg text-sm border transition-colors ${
+                      form.unit === u
+                        ? "border-blue-500 bg-blue-50 text-blue-700 font-medium"
+                        : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {u}
+                  </button>
+                ))}
+                {/* その他の単位はドロップダウン */}
+                <select
+                  name="unit"
+                  value={form.unit}
+                  onChange={handleChange}
+                  className="border border-gray-300 rounded-lg px-2 py-2 text-xs bg-gray-50 focus:outline-none"
+                  title="その他の単位"
+                >
+                  {UNITS_ALL.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
             </div>
           </div>
 
@@ -274,50 +305,100 @@ export default function MaterialModal({ material, defaultClinic, onSave, onClose
                 value={form.dailyUsage}
                 onChange={handleChange}
                 required
-                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="例: 10"
+                className="w-28 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="例: 0.3"
               />
-              <span className="text-sm text-gray-500 whitespace-nowrap">{form.unit}/日</span>
+              <span className="text-sm text-gray-500">{form.unit}/日</span>
             </div>
+            <p className="text-xs text-gray-400 mt-1">箱単位の場合は小数（例: 0.2箱/日 = 週1箱強）</p>
           </div>
 
-          {/* 残り日数プレビュー */}
+          {/* 残り稼働日数プレビュー */}
           {previewDays !== null && (
-            <div className="bg-gray-50 rounded-lg p-3 text-sm flex items-center gap-2">
-              <span className="text-gray-500">残り日数（計算結果）：</span>
-              <span className={`text-lg ${getPreviewColor(previewDays)}`}>{previewDays}日</span>
-              {previewDays < 7 && <span className="text-xs text-red-500">⚠ 要発注</span>}
+            <div className="bg-gray-50 rounded-lg p-3 text-sm flex items-center gap-3 flex-wrap">
+              <span className="text-gray-500">残り稼働日数（目安）：</span>
+              <span className={`text-xl font-black ${getPreviewColor(previewDays)}`}>{previewDays}日</span>
+              {previewMonths && (
+                <span className={`text-sm font-semibold ${getPreviewColor(previewDays)}`}>
+                  約{previewMonths}ヶ月分
+                </span>
+              )}
+              {previewDays < clinicMonthDays && (
+                <span className="text-xs text-red-500 font-semibold">⚠ 1ヶ月未満 — 要発注</span>
+              )}
             </div>
           )}
 
-          {/* ── メモ ── */}
+          {/* ── 重要度 ── */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">メモ（任意）</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">重要度</label>
+            <div className="flex gap-2">
+              {[
+                { value: "high",   label: "高（必須材料）", activeClass: "border-red-400 bg-red-50 text-red-700" },
+                { value: "medium", label: "中（通常）",     activeClass: "border-yellow-400 bg-yellow-50 text-yellow-700" },
+                { value: "low",    label: "低（任意）",     activeClass: "border-green-400 bg-green-50 text-green-700" },
+              ].map(({ value, label, activeClass }) => (
+                <label
+                  key={value}
+                  className={`flex-1 flex items-center justify-center py-2 rounded-lg border cursor-pointer text-xs font-medium transition-colors ${
+                    form.importance === value
+                      ? activeClass
+                      : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                  }`}
+                >
+                  <input type="radio" name="importance" value={value} checked={form.importance === value} onChange={handleChange} className="sr-only" />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* ── メモ（任意） ── */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              メモ
+              <span className="ml-1 text-xs text-gray-400 font-normal">（任意）</span>
+            </label>
             <textarea
               name="notes"
               value={form.notes}
               onChange={handleChange}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
               rows={2}
-              placeholder="仕入れ先、規格、発注リードタイムなど"
+              placeholder="仕入れ先、発注リードタイムなど"
             />
           </div>
 
           {/* ── ボタン ── */}
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-            >
-              キャンセル
-            </button>
-            <button
-              type="submit"
-              className="px-6 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              {material ? "更新する" : "登録する"}
-            </button>
+          <div className="flex flex-col gap-2 pt-2">
+            {/* 新規登録時のみ「保存して次を入力」ボタン（メインアクション） */}
+            {!isEditMode && (
+              <button
+                type="button"
+                onClick={() => handleSubmit(true)}
+                className="w-full px-4 py-3 text-sm font-bold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+              >
+                ✓ 保存して次を入力
+              </button>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 px-4 py-2.5 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                {savedCount > 0 ? `閉じる（${savedCount}件保存済み）` : "キャンセル"}
+              </button>
+              <button
+                type="submit"
+                className={`flex-1 px-4 py-2.5 text-sm font-medium text-white rounded-lg transition-colors ${
+                  isEditMode ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-500 hover:bg-gray-600"
+                }`}
+              >
+                {isEditMode ? "更新して閉じる" : "保存して閉じる"}
+              </button>
+            </div>
           </div>
         </form>
       </div>
